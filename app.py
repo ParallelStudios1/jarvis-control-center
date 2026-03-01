@@ -298,6 +298,8 @@ def run_pipeline(task_id, steps=10):
         step_task(task_id)
 
 
+init_db()
+
 PAGE = """
 <!doctype html>
 <html>
