@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Jarvis Control Center</title>
+  <style>
+    :root{--bg:#040914;--card:#0d1628;--line:#26344d;--text:#e8f0ff;--muted:#9fb0c9;--cyan:#34d6ff;--green:#35d07f;--amber:#f7b955;--red:#ff6b6b}
+    *{box-sizing:border-box} body{margin:0;font-family:Inter,Segoe UI,Arial,sans-serif;color:var(--text);background:radial-gradient(circle at 15% 0%,#102640 0%,var(--bg) 45%)}
+    .wrap{max-width:1100px;margin:0 auto;padding:14px}
+    .title{font-size:24px;font-weight:800;letter-spacing:.06em}.sub{color:var(--muted);font-size:12px}
+    .grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px;margin-top:10px}
+    .card{background:linear-gradient(180deg,#101b31,#0a1221);border:1px solid var(--line);border-radius:12px;padding:10px}
+    .k{font-size:11px;color:var(--muted);text-transform:uppercase}.v{font-size:20px;font-weight:800;color:var(--cyan)}
+    .section{margin-top:10px;background:linear-gradient(180deg,#101b31,#0a1221);border:1px solid var(--line);border-radius:12px;padding:10px}
+    .flow{display:flex;flex-wrap:wrap;gap:8px}.node{padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#0a1425;font-size:12px}.arrow{align-self:center;opacity:.7}
+    .agents{display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:8px}
+    .agent{border:1px solid var(--line);border-radius:10px;padding:10px;background:#09101d}
+    .pill{display:inline-block;border:1px solid var(--line);padding:2px 8px;border-radius:999px;font-size:11px;margin-left:6px}
+    input,textarea{width:100%;margin:4px 0;padding:8px;border-radius:8px;border:1px solid #3a4f74;background:#081221;color:var(--text)}
+    button{border:none;border-radius:10px;padding:8px 10px;font-weight:700;cursor:pointer}
+    .run{background:linear-gradient(90deg,var(--green),#19b39c);color:#072015}.step{background:linear-gradient(90deg,var(--cyan),#4f8cff);color:#08162a}
+    .pause{background:var(--amber)} .resume{background:var(--red);color:#210b0b}
+    .task{border:1px solid var(--line);border-radius:10px;padding:8px;margin-bottom:8px;background:#09101d}
+    .small{font-size:12px;color:var(--muted)} .logs{max-height:220px;overflow:auto;background:#07101d;border:1px solid var(--line);border-radius:10px;padding:8px}
+    @media(max-width:800px){.grid{grid-template-columns:repeat(2,minmax(120px,1fr))}.agents{grid-template-columns:1fr}.title{font-size:20px}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="title">JARVIS ORCHESTRATOR</div>
+  <div class="sub">GitHub-hosted (static) • mobile first • Planner → Coder → Debugger → Reviewer</div>
+
+  <div class="grid">
+    <div class="card"><div class="k">Tasks</div><div class="v" id="tasksCount">0</div></div>
+    <div class="card"><div class="k">Done</div><div class="v" id="doneCount">0</div></div>
+    <div class="card"><div class="k">In Progress</div><div class="v" id="inCount">0</div></div>
+    <div class="card"><div class="k">Logs</div><div class="v" id="logCount">0</div></div>
+  </div>
+
+  <div class="section">
+    <h3>Pipeline</h3>
+    <div class="flow">
+      <div class="node">🧠 Planner</div><div class="arrow">→</div>
+      <div class="node">💻 Coder</div><div class="arrow">→</div>
+      <div class="node">🐞 Debugger</div><div class="arrow">→</div>
+      <div class="node">✅ Reviewer</div>
+      <div class="node">Rule: debug fail 2x → planner</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Specialists</h3>
+    <div class="agents" id="agents"></div>
+  </div>
+
+  <div class="section">
+    <h3>Create Task</h3>
+    <input id="title" placeholder="Task title" />
+    <textarea id="objective" rows="3" placeholder="Objective"></textarea>
+    <button class="run" onclick="newTask()">Create + Start</button>
+  </div>
+
+  <div class="section">
+    <h3>Task Board</h3>
+    <div id="tasks"></div>
+  </div>
+
+  <div class="section">
+    <h3>Logs</h3>
+    <div class="logs" id="logs"></div>
+  </div>
+</div>
+
+<script>
+const STATE_KEY='jarvis_static_state_v1';
+const S={specialists:{planner:{name:'Planner',emoji:'🧠',active:true,score:100},coder:{name:'Coder',emoji:'💻',active:true,score:100},debugger:{name:'Debugger',emoji:'🐞',active:true,score:100},reviewer:{name:'Reviewer',emoji:'✅',active:true,score:100}},tasks:[],logs:[]};
+function load(){try{const x=JSON.parse(localStorage.getItem(STATE_KEY)); if(x) Object.assign(S,x);}catch(e){}}
+function save(){localStorage.setItem(STATE_KEY,JSON.stringify(S));}
+function log(m){S.logs.unshift('['+new Date().toLocaleString()+'] '+m); if(S.logs.length>300)S.logs.length=300;}
+function score(a,d){S.specialists[a].score=Math.max(1,Math.min(100,S.specialists[a].score+d));}
+function newTask(){const title=document.getElementById('title').value.trim(); const objective=document.getElementById('objective').value.trim(); if(!title||!objective) return; const id=Date.now(); S.tasks.unshift({id,title,objective,status:'in_progress',owner:'planner',step:0,max:12,confidence:50,recode:0,cycles:{p:0,c:0,d:0,r:0}}); log('Task #'+id+' created: '+title); document.getElementById('title').value=''; document.getElementById('objective').value=''; autorun(id,3); render();}
+function route(t,to,why){t.owner=to; t.status='in_progress'; t.confidence=Math.max(1,t.confidence-(to==='planner'?8:5)); if(to==='planner') t.cycles.p++; if(to==='coder'){t.cycles.c++; t.recode++;} log('Task #'+t.id+': '+why+' -> '+to);}
+function step(id){const t=S.tasks.find(x=>x.id===id); if(!t||t.status==='done'||t.status==='failed') return; if(t.step>=t.max){t.status='failed'; log('Task #'+id+' failed (step cap)'); return;} if(!S.specialists[t.owner].active){log('Task #'+id+' paused: '+t.owner+' disabled'); return;} t.step++;
+ if(t.owner==='planner'){t.owner='coder'; t.cycles.p++; t.confidence=Math.min(99,t.confidence+8); score('planner',1); log('Planner -> Coder #'+id);} 
+ else if(t.owner==='coder'){t.owner='debugger'; t.cycles.c++; t.confidence=Math.min(99,t.confidence+6); score('coder',1); log('Coder -> Debugger #'+id);} 
+ else if(t.owner==='debugger'){t.cycles.d++; const fail=(t.recode<2 && t.step%2===0)||t.confidence<45; if(fail){score('debugger',-1); if(t.recode>=2) route(t,'planner','debug failed 2x'); else route(t,'coder','debug found defects');} else {t.owner='reviewer'; t.confidence=Math.min(99,t.confidence+7); score('debugger',1); log('Debugger -> Reviewer #'+id);} }
+ else if(t.owner==='reviewer'){t.cycles.r++; if(t.confidence>=60){t.status='done'; t.confidence=Math.min(100,t.confidence+3); score('reviewer',1); log('Task #'+id+' completed ✅');} else {score('reviewer',-2); route(t,'planner','review confidence too low');}}
+ save(); render();}
+function autorun(id,n=12){for(let i=0;i<n;i++){const t=S.tasks.find(x=>x.id===id); if(!t||t.status==='done'||t.status==='failed') break; step(id);} render();}
+function toggle(k){S.specialists[k].active=!S.specialists[k].active; log(S.specialists[k].name+' '+(S.specialists[k].active?'resumed':'paused')); save(); render();}
+function render(){
+ const tasks=S.tasks; document.getElementById('tasksCount').textContent=tasks.length; document.getElementById('doneCount').textContent=tasks.filter(t=>t.status==='done').length; document.getElementById('inCount').textContent=tasks.filter(t=>!['done','failed'].includes(t.status)).length; document.getElementById('logCount').textContent=S.logs.length;
+ document.getElementById('agents').innerHTML=Object.entries(S.specialists).map(([k,a])=>`<div class='agent'><b>${a.emoji} ${a.name}</b><span class='pill'>${a.active?'ACTIVE':'PAUSED'}</span><div class='small'>Quality: ${a.score}%</div><button class='${a.active?'pause':'resume'}' onclick="toggle('${k}')">${a.active?'Pause':'Resume'}</button></div>`).join('');
+ document.getElementById('tasks').innerHTML=tasks.map(t=>`<div class='task'><b>#${t.id} ${t.title}</b><div class='small'>Status: ${t.status} | Owner: ${t.owner} | Step: ${t.step}/${t.max} | Confidence: ${t.confidence}%</div><div class='small'>Loops P:${t.cycles.p} C:${t.cycles.c} D:${t.cycles.d} R:${t.cycles.r} | Recode:${t.recode}</div><div class='small'>${t.objective}</div><div style='margin-top:6px'><button class='step' onclick='step(${t.id})'>Run 1 Step</button> <button class='run' onclick='autorun(${t.id},12)'>One-Tap Full Cycle</button></div></div>`).join('') || '<div class="small">No tasks yet.</div>';
+ document.getElementById('logs').innerHTML=S.logs.map(l=>`<div class='small'>${l}</div>`).join('') || '<div class="small">No logs yet.</div>';
+}
+load(); render();
+</script>
+</body>
+</html>
