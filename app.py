@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import random
 from datetime import datetime
 from flask import Flask, redirect, render_template_string, request, url_for
 
@@ -8,14 +9,14 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(BASE, "jarvis.db")
 
 SPECIALISTS = {
-    "planner": {"name": "Planner", "emoji": "🧠", "desc": "Breaks goals into actionable plans", "active": True},
-    "coder": {"name": "Coder", "emoji": "💻", "desc": "Implements the current plan", "active": True},
-    "debugger": {"name": "Debugger", "emoji": "🐞", "desc": "Finds/fixes issues and verifies output", "active": True},
-    "reviewer": {"name": "Reviewer", "emoji": "✅", "desc": "Final quality gate + handoff", "active": True},
+    "planner": {"name": "Planner", "emoji": "🧠", "desc": "Breaks goals into actionable plans", "active": True, "score": 100},
+    "coder": {"name": "Coder", "emoji": "💻", "desc": "Implements the current plan", "active": True, "score": 100},
+    "debugger": {"name": "Debugger", "emoji": "🐞", "desc": "Finds/fixes issues and verifies output", "active": True, "score": 100},
+    "reviewer": {"name": "Reviewer", "emoji": "✅", "desc": "Final quality gate + handoff", "active": True, "score": 100},
 }
 
 RUN_LOG = []
-MAX_LOG = 300
+MAX_LOG = 500
 
 
 def now():
@@ -45,17 +46,37 @@ def init_db():
             status TEXT,
             owner TEXT,
             step_count INTEGER DEFAULT 0,
-            max_steps INTEGER DEFAULT 8,
+            max_steps INTEGER DEFAULT 10,
+            confidence INTEGER DEFAULT 50,
+            planner_cycles INTEGER DEFAULT 0,
+            coder_cycles INTEGER DEFAULT 0,
+            debugger_cycles INTEGER DEFAULT 0,
+            reviewer_cycles INTEGER DEFAULT 0,
+            recode_count INTEGER DEFAULT 0,
             plan_text TEXT DEFAULT '',
             code_text TEXT DEFAULT '',
             debug_text TEXT DEFAULT '',
             review_text TEXT DEFAULT '',
-            needs_recode INTEGER DEFAULT 0,
             created_at TEXT,
             updated_at TEXT
         )
         """
     )
+    con.commit()
+
+    # lightweight migration for older dbs
+    cols = {r[1] for r in con.execute("PRAGMA table_info(tasks)").fetchall()}
+    migrations = {
+        "confidence": "ALTER TABLE tasks ADD COLUMN confidence INTEGER DEFAULT 50",
+        "planner_cycles": "ALTER TABLE tasks ADD COLUMN planner_cycles INTEGER DEFAULT 0",
+        "coder_cycles": "ALTER TABLE tasks ADD COLUMN coder_cycles INTEGER DEFAULT 0",
+        "debugger_cycles": "ALTER TABLE tasks ADD COLUMN debugger_cycles INTEGER DEFAULT 0",
+        "reviewer_cycles": "ALTER TABLE tasks ADD COLUMN reviewer_cycles INTEGER DEFAULT 0",
+        "recode_count": "ALTER TABLE tasks ADD COLUMN recode_count INTEGER DEFAULT 0",
+    }
+    for col, sql in migrations.items():
+        if col not in cols:
+            con.execute(sql)
     con.commit()
     con.close()
 
@@ -81,11 +102,13 @@ def create_task(title, objective):
 
 
 def update_task(task_id, **kwargs):
+    if not kwargs:
+        return
     con = db()
     fields = ", ".join([f"{k}=?" for k in kwargs.keys()])
-    vals = list(kwargs.values())
-    vals.append(task_id)
-    con.execute(f"UPDATE tasks SET {fields}, updated_at=? WHERE id=?", vals[:-1] + [now(), task_id])
+    values = list(kwargs.values())
+    sql = f"UPDATE tasks SET {fields}, updated_at=? WHERE id=?"
+    con.execute(sql, values + [now(), task_id])
     con.commit()
     con.close()
 
@@ -101,6 +124,36 @@ def specialist_active(name):
     return SPECIALISTS.get(name, {}).get("active", False)
 
 
+def adjust_score(agent, delta):
+    old = SPECIALISTS[agent]["score"]
+    SPECIALISTS[agent]["score"] = max(1, min(100, old + delta))
+
+
+def route_to_planner(task_id, t, reason):
+    update_task(
+        task_id,
+        owner="planner",
+        status="in_progress",
+        planner_cycles=t["planner_cycles"] + 1,
+        confidence=max(1, t["confidence"] - 8),
+    )
+    adjust_score("planner", -2)
+    add_log(f"Task #{task_id}: {reason} -> routed to Planner")
+
+
+def route_to_coder(task_id, t, reason):
+    update_task(
+        task_id,
+        owner="coder",
+        status="in_progress",
+        coder_cycles=t["coder_cycles"] + 1,
+        confidence=max(1, t["confidence"] - 5),
+        recode_count=t["recode_count"] + 1,
+    )
+    adjust_score("coder", -1)
+    add_log(f"Task #{task_id}: {reason} -> routed to Coder")
+
+
 def step_task(task_id):
     t = get_task(task_id)
     if not t:
@@ -108,13 +161,13 @@ def step_task(task_id):
     if t["status"] in ("done", "failed"):
         return
     if t["step_count"] >= t["max_steps"]:
-        update_task(task_id, status="failed")
-        add_log(f"Task #{task_id} exceeded step limit and was marked failed")
+        update_task(task_id, status="failed", confidence=max(1, t["confidence"] - 15))
+        add_log(f"Task #{task_id} failed (max step limit reached)")
         return
 
     owner = t["owner"]
     if not specialist_active(owner):
-        add_log(f"Task #{task_id} paused: {owner} is disabled")
+        add_log(f"Task #{task_id} paused: {owner} lane disabled")
         return
 
     step_count = t["step_count"] + 1
@@ -122,54 +175,122 @@ def step_task(task_id):
     if owner == "planner":
         plan = (
             f"Plan v{step_count}:\n"
-            f"1) Define success criteria for '{t['title']}'\n"
-            f"2) Build smallest working version\n"
-            f"3) Validate outcomes and iterate"
+            "1) Define measurable success criteria\n"
+            "2) Build smallest shippable increment\n"
+            "3) Verify against edge cases and user goals"
         )
-        update_task(task_id, owner="coder", status="in_progress", step_count=step_count, plan_text=plan, needs_recode=0)
-        add_log(f"Planner -> Coder for Task #{task_id}")
+        conf = min(99, t["confidence"] + random.randint(6, 12))
+        update_task(
+            task_id,
+            owner="coder",
+            status="in_progress",
+            step_count=step_count,
+            planner_cycles=t["planner_cycles"] + 1,
+            plan_text=plan,
+            confidence=conf,
+        )
+        adjust_score("planner", +1)
+        add_log(f"Planner -> Coder for Task #{task_id} (confidence {conf}%)")
 
     elif owner == "coder":
         code = (
             f"Implementation v{step_count}:\n"
-            f"- Built features from plan\n"
-            f"- Added basic error handling\n"
-            f"- Prepared for debugger pass"
+            "- Features implemented from plan\n"
+            "- Added validation + error handling\n"
+            "- Ready for debugger pass"
         )
-        update_task(task_id, owner="debugger", status="in_progress", step_count=step_count, code_text=code)
-        add_log(f"Coder -> Debugger for Task #{task_id}")
+        conf = min(99, t["confidence"] + random.randint(3, 8))
+        update_task(
+            task_id,
+            owner="debugger",
+            status="in_progress",
+            step_count=step_count,
+            coder_cycles=t["coder_cycles"] + 1,
+            code_text=code,
+            confidence=conf,
+        )
+        adjust_score("coder", +1)
+        add_log(f"Coder -> Debugger for Task #{task_id} (confidence {conf}%)")
 
     elif owner == "debugger":
-        # Simple deterministic loop: every second debugger pass requests recode once, then passes
-        needs_recode = 1 if (t["needs_recode"] == 0 and step_count % 2 == 0) else 0
-        if needs_recode:
+        # Policy: if fails 2+ times, send back to planner; otherwise coder
+        should_fail = (t["recode_count"] < 2 and step_count % 2 == 0) or (t["confidence"] < 45)
+        if should_fail:
             debug = (
                 f"Debug pass v{step_count}:\n"
-                f"- Found defects in edge-case handling\n"
-                f"- Returning to coder for fixes"
+                "- Blocking defects found\n"
+                "- Needs rework before review"
             )
-            update_task(task_id, owner="coder", status="in_progress", step_count=step_count, debug_text=debug, needs_recode=1)
-            add_log(f"Debugger -> Coder (rework) for Task #{task_id}")
+            update_task(
+                task_id,
+                step_count=step_count,
+                debugger_cycles=t["debugger_cycles"] + 1,
+                debug_text=debug,
+            )
+            adjust_score("debugger", -1)
+
+            latest = get_task(task_id)
+            if latest["recode_count"] >= 2:
+                route_to_planner(task_id, latest, "debug failed 2x")
+            else:
+                route_to_coder(task_id, latest, "debug found defects")
         else:
             debug = (
                 f"Debug pass v{step_count}:\n"
-                f"- Core checks passed\n"
-                f"- No blocking issues"
+                "- Core checks passed\n"
+                "- No blocking issues"
             )
-            update_task(task_id, owner="reviewer", status="in_progress", step_count=step_count, debug_text=debug)
-            add_log(f"Debugger -> Reviewer for Task #{task_id}")
+            conf = min(99, t["confidence"] + random.randint(4, 10))
+            update_task(
+                task_id,
+                owner="reviewer",
+                status="in_progress",
+                step_count=step_count,
+                debugger_cycles=t["debugger_cycles"] + 1,
+                debug_text=debug,
+                confidence=conf,
+            )
+            adjust_score("debugger", +1)
+            add_log(f"Debugger -> Reviewer for Task #{task_id} (confidence {conf}%)")
 
     elif owner == "reviewer":
-        review = (
-            f"Review v{step_count}:\n"
-            f"- Output meets success criteria\n"
-            f"- Ready for delivery"
-        )
-        update_task(task_id, status="done", owner="reviewer", step_count=step_count, review_text=review)
-        add_log(f"Task #{task_id} completed ✅")
+        pass_review = t["confidence"] >= 60
+        if pass_review:
+            review = (
+                f"Review v{step_count}:\n"
+                "- Output meets success criteria\n"
+                "- Approved for delivery"
+            )
+            conf = min(100, t["confidence"] + random.randint(1, 5))
+            update_task(
+                task_id,
+                status="done",
+                owner="reviewer",
+                step_count=step_count,
+                reviewer_cycles=t["reviewer_cycles"] + 1,
+                review_text=review,
+                confidence=conf,
+            )
+            adjust_score("reviewer", +1)
+            add_log(f"Task #{task_id} completed ✅ (confidence {conf}%)")
+        else:
+            review = (
+                f"Review v{step_count}:\n"
+                "- Confidence too low for handoff\n"
+                "- Routing back to planner"
+            )
+            update_task(
+                task_id,
+                step_count=step_count,
+                reviewer_cycles=t["reviewer_cycles"] + 1,
+                review_text=review,
+            )
+            adjust_score("reviewer", -2)
+            latest = get_task(task_id)
+            route_to_planner(task_id, latest, "review confidence too low")
 
 
-def run_pipeline(task_id, steps=6):
+def run_pipeline(task_id, steps=10):
     for _ in range(max(1, steps)):
         t = get_task(task_id)
         if not t or t["status"] in ("done", "failed"):
@@ -207,8 +328,12 @@ PAGE = """
     .form input,.form textarea{width:100%;box-sizing:border-box;margin:4px 0;padding:8px;border-radius:8px;border:1px solid #3a4f74;background:#081221;color:var(--text)}
     .tasks .task{border:1px solid var(--line);border-radius:10px;padding:8px;margin-bottom:8px;background:#09101d}
     .small{font-size:12px;color:var(--muted)}
-    .logs{max-height:220px;overflow:auto;background:#07101d;border:1px solid var(--line);border-radius:10px;padding:8px}
+    .logs{max-height:260px;overflow:auto;background:#07101d;border:1px solid var(--line);border-radius:10px;padding:8px}
     .pill{display:inline-block;border:1px solid var(--line);padding:2px 8px;border-radius:999px;font-size:11px;margin-right:6px}
+    .flow{display:flex;gap:8px;flex-wrap:wrap}
+    .node{padding:8px 12px;border-radius:10px;border:1px solid var(--line);background:#0a1628;font-size:12px}
+    .arrow{opacity:.7;align-self:center}
+    .score{font-size:11px;color:#c6f4ff}
     @media (max-width:800px){
       .grid{grid-template-columns:repeat(2,minmax(120px,1fr));}
       .agents{grid-template-columns:1fr;}
@@ -221,7 +346,7 @@ PAGE = """
   <div class='top'>
     <div>
       <div class='title'>JARVIS ORCHESTRATOR</div>
-      <div class='sub'>Master-control pipeline: Planner ➜ Coder ➜ Debugger ➜ Reviewer (looping decisions)</div>
+      <div class='sub'>Mastermind flow with routing rules + confidence scoring</div>
     </div>
   </div>
 
@@ -234,12 +359,24 @@ PAGE = """
 
   <div class='row'>
     <div class='section'>
-      <h3>Specialist Agents (Mastermind Controlled)</h3>
+      <h3>Pipeline Graph</h3>
+      <div class='flow'>
+        <div class='node'>🧠 Planner</div><div class='arrow'>→</div>
+        <div class='node'>💻 Coder</div><div class='arrow'>→</div>
+        <div class='node'>🐞 Debugger</div><div class='arrow'>→</div>
+        <div class='node'>✅ Reviewer</div>
+        <div class='node'>Rule: debug fail 2x → Planner</div>
+      </div>
+    </div>
+
+    <div class='section'>
+      <h3>Specialist Agents</h3>
       <div class='agents'>
         {% for key,a in specialists.items() %}
         <div class='agent'>
           <div><b>{{a['emoji']}} {{a['name']}}</b> <span class='pill'>{{'ACTIVE' if a['active'] else 'PAUSED'}}</span></div>
           <div class='small'>{{a['desc']}}</div>
+          <div class='score'>Quality score: {{a['score']}}%</div>
           <form method='post' action='/toggle/{{key}}' style='margin-top:6px;'>
             <button class='btn {{'btn-on' if a['active'] else 'btn-off'}}'>{{'Pause' if a['active'] else 'Resume'}}</button>
           </form>
@@ -262,14 +399,15 @@ PAGE = """
       {% for t in tasks %}
       <div class='task'>
         <div><b>#{{t['id']}} {{t['title']}}</b></div>
-        <div class='small'>Status: {{t['status']}} | Owner: {{t['owner']}} | Steps: {{t['step_count']}}/{{t['max_steps']}}</div>
+        <div class='small'>Status: {{t['status']}} | Owner: {{t['owner']}} | Steps: {{t['step_count']}}/{{t['max_steps']}} | Confidence: {{t['confidence']}}%</div>
+        <div class='small'>Loops — P:{{t['planner_cycles']}} C:{{t['coder_cycles']}} D:{{t['debugger_cycles']}} R:{{t['reviewer_cycles']}} | Recode: {{t['recode_count']}}</div>
         <div class='small'>{{t['objective']}}</div>
         <div style='margin-top:6px;'>
           <form method='post' action='/step/{{t['id']}}' style='display:inline;'>
             <button class='btn btn-step'>Run 1 Step</button>
           </form>
           <form method='post' action='/autorun/{{t['id']}}' style='display:inline;'>
-            <button class='btn btn-run'>Auto-Run Pipeline</button>
+            <button class='btn btn-run'>One-Tap Full Cycle</button>
           </form>
         </div>
       </div>
@@ -315,7 +453,7 @@ def new_task():
     objective = request.form.get("objective", "").strip()
     if title and objective:
         tid = create_task(title, objective)
-        run_pipeline(tid, steps=2)
+        run_pipeline(tid, steps=3)
     return redirect(url_for("home"))
 
 
@@ -335,7 +473,7 @@ def step(task_id):
 
 @app.post("/autorun/<int:task_id>")
 def autorun(task_id):
-    run_pipeline(task_id, steps=10)
+    run_pipeline(task_id, steps=12)
     return redirect(url_for("home"))
 
 
